@@ -1,22 +1,50 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { chat, createSession, queryAgentConfigList } from "../api/agent";
+import {
+  downloadDrawioXml,
+  extractDrawioXml,
+  hasDiagramContent,
+} from "../utils/drawio";
+import { QUICK_EXAMPLES, type QuickExample } from "../config/examples";
+import type { AgentConfig } from "../types/api";
+import { useAuth } from "./AuthGate";
+import { CodeBlock, splitContentSegments } from "./CodeBlock";
+import SettingsPanel from "./SettingsPanel";
+import NewChatDialog from "./NewChatDialog";
 
 type Message = {
   id: string;
   role: "user" | "agent";
   content: string;
+  /** 附带的代码（如 AI 生成的 draw.io XML），在气泡中以可折叠代码块展示 */
+  code?: string;
 };
 
 const INITIAL_MESSAGES: Message[] = [
   {
     id: "welcome",
     role: "agent",
-    content: "你好，我是 AI 绘图助手。描述你想要的图表，我来帮你生成。",
+    content: "你好，我是 AI 绘图助手。描述你想要的图表，我来帮你生成并渲染到左侧画布。",
   },
 ];
 
-export default function ChatPanel() {
+interface ChatPanelProps {
+  /** AI 生成的图表 XML 回调，用于渲染到 draw.io 面板 */
+  onDiagramXml?: (xml: string) => void;
+  /** 获取当前画布 XML（新建对话前判断内容 / 保存用） */
+  getCanvasXml?: () => string | null;
+  /** 清空画布（新建对话时调用） */
+  onClearCanvas?: () => void;
+}
+
+export default function ChatPanel({
+  onDiagramXml,
+  getCanvasXml,
+  onClearCanvas,
+}: ChatPanelProps) {
+  const { user, isLoggedIn } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
   const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
   const [input, setInput] = useState("");
@@ -26,10 +54,45 @@ export default function ChatPanel() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // 设置弹窗（登录信息等）开关
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 首次进入显示快速示例界面；发起对话或点击示例后进入对话界面
+  const [showExamples, setShowExamples] = useState(true);
+  // 新建对话确认弹窗（画布有内容时询问是否保存）
+  const [newChatDialogOpen, setNewChatDialogOpen] = useState(false);
+  // 智能体列表与当前选中的智能体
+  const [agents, setAgents] = useState<AgentConfig[]>([]);
+  const [agentsError, setAgentsError] = useState("");
+  const [currentAgentId, setCurrentAgentId] = useState("");
+  // 当前会话 ID（对话前若为空则自动创建）
+  const sessionIdRef = useRef<string>("");
+  const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
-  const pendingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // 挂载后加载智能体配置列表（未登录时不加载；登录态变化由 key 重挂载完成重置）
+  useEffect(() => {
+    if (!isLoggedIn || !user) return;
+    let cancelled = false;
+    queryAgentConfigList()
+      .then((list) => {
+        if (cancelled) return;
+        // 按智能体 ID 由小到大排序（数字感知比较，如 "9" < "100003"）
+        const sorted = [...list].sort((a, b) =>
+          a.agentId.localeCompare(b.agentId, undefined, { numeric: true })
+        );
+        setAgents(sorted);
+        setCurrentAgentId((prev) => prev || sorted[0]?.agentId || "");
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setAgentsError(err instanceof Error ? err.message : "智能体列表加载失败");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoggedIn, user]);
 
   // 拖动左侧分隔条调节对话页宽度（带最小/最大宽度限制）
   const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -77,6 +140,98 @@ export default function ChatPanel() {
     -1
   );
 
+  // 新增 / 替换 agent 消息：有 targetAgentId 时替换该消息，否则在末尾追加
+  const upsertAgentMessage = (
+    msg: { content: string; code?: string },
+    targetAgentId?: string
+  ) => {
+    setMessages((prev) =>
+      targetAgentId
+        ? prev.map((m) => (m.id === targetAgentId ? { ...m, ...msg } : m))
+        : [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              role: "agent" as const,
+              ...msg,
+            },
+          ]
+    );
+  };
+
+  // 确保已有会话 ID，没有则先创建
+  const ensureSession = async (): Promise<string> => {
+    if (sessionIdRef.current) return sessionIdRef.current;
+    const created = await createSession({
+      agentId: currentAgentId,
+      userId: user!.user,
+    });
+    sessionIdRef.current = created.sessionId;
+    return created.sessionId;
+  };
+
+  // 调用智能体对话接口：返回内容若为 draw.io XML 则渲染到画布，否则作为文本展示
+  const runChat = async (userText: string, targetAgentId?: string) => {
+    if (pending) return;
+    if (!isLoggedIn || !user) return;
+    if (!currentAgentId) {
+      upsertAgentMessage(
+        {
+          content: agentsError
+            ? `【接口异常】${agentsError}`
+            : "智能体列表加载中，请稍后重试。",
+        },
+        targetAgentId
+      );
+      return;
+    }
+
+    setPending(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const sessionId = await ensureSession();
+      const res = await chat(
+        {
+          agentId: currentAgentId,
+          userId: user.user,
+          sessionId,
+          message: userText,
+        },
+        controller.signal
+      );
+      const content = res.content ?? "";
+      const xml = extractDrawioXml(content);
+      if (xml) {
+        onDiagramXml?.(xml);
+        upsertAgentMessage(
+          {
+            content: "已根据你的描述生成图表，并渲染到左侧画布，可直接编辑或导出。",
+            code: xml,
+          },
+          targetAgentId
+        );
+      } else {
+        upsertAgentMessage(
+          { content: content || "（智能体未返回内容）" },
+          targetAgentId
+        );
+      }
+    } catch (err) {
+      // 用户主动停止生成时不追加错误消息
+      if (err instanceof Error && err.name === "AbortError") return;
+      upsertAgentMessage(
+        {
+          content: `【请求异常】${err instanceof Error ? err.message : "未知错误"}`,
+        },
+        targetAgentId
+      );
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setPending(false);
+    }
+  };
+
   const handleSend = () => {
     const text = input.trim();
     if (!text || pending) return;
@@ -89,28 +244,66 @@ export default function ChatPanel() {
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
-    setPending(true);
-
-    // 模拟 agent 智能体回复（后续可替换为真实接口调用）
-    pendingTimer.current = setTimeout(() => {
-      const agentMsg: Message = {
-        id: crypto.randomUUID(),
-        role: "agent",
-        content: `已收到你的请求：「${text}」。正在为你生成图表……（示例回复，可接入真实 AI 接口）`,
-      };
-      setMessages((prev) => [...prev, agentMsg]);
-      setPending(false);
-      pendingTimer.current = null;
-    }, 600);
+    setShowExamples(false);
+    void runChat(text);
   };
 
-  // 停止正在进行的生成（清空计时器并结束 pending 状态）
+  // 停止正在进行的生成（中断请求并结束 pending 状态）
   const stopGeneration = () => {
-    if (pendingTimer.current) {
-      clearTimeout(pendingTimer.current);
-      pendingTimer.current = null;
+    abortRef.current?.abort();
+  };
+
+  // 切换智能体后清空会话，下次对话时重新创建
+  const handleAgentChange = (agentId: string) => {
+    setCurrentAgentId(agentId);
+    sessionIdRef.current = "";
+  };
+
+  // 回到快速示例界面：清空会话与消息，并清空画布（saveCanvas 为 true 时先下载保存当前图表）
+  const resetToExamples = (saveCanvas = false) => {
+    abortRef.current?.abort();
+    if (saveCanvas) {
+      const xml = getCanvasXml?.();
+      if (xml) downloadDrawioXml(xml);
     }
-    setPending(false);
+    onClearCanvas?.();
+    sessionIdRef.current = "";
+    setMessages(INITIAL_MESSAGES);
+    setShowExamples(true);
+  };
+
+  // 新建对话：画布有内容时先弹窗询问是否保存
+  const handleNewChat = () => {
+    if (hasDiagramContent(getCanvasXml?.())) {
+      setNewChatDialogOpen(true);
+      return;
+    }
+    resetToExamples();
+  };
+
+  // 点击快速示例：本地生成示例对话并渲染画布（不请求消息接口），
+  // 同时创建 SessionID，便于后续在该会话中继续对话
+  const handleExample = (example: QuickExample) => {
+    onDiagramXml?.(example.xml);
+    setShowExamples(false);
+    setMessages([
+      { id: crypto.randomUUID(), role: "user", content: example.prompt },
+      {
+        id: crypto.randomUUID(),
+        role: "agent",
+        content: example.reply,
+        code: example.xml,
+      },
+    ]);
+    if (isLoggedIn && user && currentAgentId) {
+      createSession({ agentId: currentAgentId, userId: user.user })
+        .then((created) => {
+          sessionIdRef.current = created.sessionId;
+        })
+        .catch(() => {
+          // 创建失败不阻断示例展示，后续发送消息时会自动重试创建
+        });
+    }
   };
 
   // 输入框随内容自动增高（上限后滚动）
@@ -141,27 +334,6 @@ export default function ChatPanel() {
     }
   };
 
-  // 根据用户输入生成 / 重新生成 agent 响应：
-  // - 若提供 targetAgentId，则替换该 agent 消息；否则在末尾追加一条新 agent 消息
-  const regenerateResponse = (userText: string, targetAgentId?: string) => {
-    if (pending) return;
-    setPending(true);
-    pendingTimer.current = setTimeout(() => {
-      const agentMsg: Message = {
-        id: crypto.randomUUID(),
-        role: "agent",
-        content: `已收到你的请求：「${userText}」。正在为你生成图表……（示例回复，可接入真实 AI 接口）`,
-      };
-      setMessages((prev) =>
-        targetAgentId
-          ? prev.map((m) => (m.id === targetAgentId ? agentMsg : m))
-          : [...prev, agentMsg]
-      );
-      setPending(false);
-      pendingTimer.current = null;
-    }, 600);
-  };
-
   // 重新生成指定 agent 消息的响应（基于其前最近的用户消息）
   const handleRetry = (agentId: string) => {
     if (pending) return;
@@ -175,7 +347,7 @@ export default function ChatPanel() {
       }
     }
     if (!userText) return;
-    regenerateResponse(userText, agentId);
+    void runChat(userText, agentId);
   };
 
   // 进入 / 保存 / 取消用户消息的编辑
@@ -202,12 +374,34 @@ export default function ChatPanel() {
     setEditingId(null);
     setEditText("");
     // 保存后重新发起请求（类似重试）
-    regenerateResponse(text, followingAgentId);
+    void runChat(text, followingAgentId);
   };
 
   const cancelEdit = () => {
     setEditingId(null);
     setEditText("");
+  };
+
+  // 渲染消息内容：附带代码的消息（如 AI 生成的 XML）以可折叠代码块展示，
+  // 普通消息中的 Markdown 围栏代码块超过长度也会自动折叠
+  const renderContent = (msg: Message) => {
+    if (msg.code) {
+      return (
+        <>
+          <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+          <CodeBlock code={msg.code} />
+        </>
+      );
+    }
+    return splitContentSegments(msg.content).map((seg, i) =>
+      seg.type === "code" ? (
+        <CodeBlock key={i} code={seg.code} />
+      ) : (
+        <p key={i} className="whitespace-pre-wrap break-words">
+          {seg.text}
+        </p>
+      )
+    );
   };
 
   if (collapsed) {
@@ -244,27 +438,105 @@ export default function ChatPanel() {
       >
         <div className="h-10 w-1 rounded-full bg-zinc-300 transition-colors group-hover:bg-zinc-400 dark:bg-zinc-700 dark:group-hover:bg-zinc-500" />
       </div>
-      <div className="flex items-start justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
-        <div className="flex flex-col gap-0.5">
-          <h1 className="text-base font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+      <div className="relative flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-violet-500 text-sm text-white shadow-sm"
+            aria-hidden="true"
+          >
+            ✦
+          </span>
+          <h1 className="min-w-0 truncate text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
             AI Draw.io 编辑器
           </h1>
-          <h2 className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-            对话
-          </h2>
         </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen((prev) => !prev)}
+            title="设置"
+            aria-expanded={settingsOpen}
+            className={`rounded-md p-1.5 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 ${
+              settingsOpen
+                ? "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100"
+                : "text-zinc-500 dark:text-zinc-400"
+            }`}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => setCollapsed(true)}
+            title="收起"
+            className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+          </button>
+        </div>
+        <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      </div>
+      <div className="flex items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
+        <select
+          value={currentAgentId}
+          onChange={(e) => handleAgentChange(e.target.value)}
+          title="选择智能体"
+          className="h-7 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+        >
+          {agents.length === 0 && (
+            <option value="">
+              {agentsError ? "智能体加载失败" : "智能体加载中…"}
+            </option>
+          )}
+          {agents.map((agent) => (
+            <option key={agent.agentId} value={agent.agentId}>
+              {agent.agentName}
+              {agent.agentDesc ? `（${agent.agentDesc}）` : ""}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
-          onClick={() => setCollapsed(true)}
-          title="收起"
-          className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          onClick={handleNewChat}
+          disabled={pending}
+          title="新建对话"
+          className="shrink-0 rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-800 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-800"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M9 18l6-6-6-6" />
-          </svg>
+          ＋ 新建
         </button>
       </div>
 
+      {showExamples ? (
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+            快速示例
+          </h2>
+          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            点击示例快速开始，图表会自动渲染到左侧画布，也可以直接输入你的需求。
+          </p>
+          <div className="mt-3 flex flex-col gap-2">
+            {QUICK_EXAMPLES.map((example) => (
+              <button
+                key={example.id}
+                type="button"
+                onClick={() => handleExample(example)}
+                className="rounded-lg border border-zinc-200 p-3 text-left transition-colors hover:border-blue-400 hover:bg-blue-50/60 dark:border-zinc-700 dark:hover:border-blue-500 dark:hover:bg-blue-950/40"
+              >
+                <div className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                  {example.title}
+                </div>
+                <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                  {example.description}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
       <div
         ref={listRef}
         className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4"
@@ -348,13 +620,13 @@ export default function ChatPanel() {
           ) : (
             <div key={msg.id} className="group flex flex-col items-start gap-1">
               <div className="max-w-[85%] rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100">
-                {msg.content}
+                {renderContent(msg)}
               </div>
               <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                 <button
                   type="button"
                   title={copiedId === msg.id ? "已复制" : "复制消息"}
-                  onClick={() => copyText(msg.content, msg.id)}
+                  onClick={() => copyText(msg.code ?? msg.content, msg.id)}
                   className={`rounded p-1 transition-colors ${
                     copiedId === msg.id
                       ? "text-green-500 hover:bg-green-100 dark:hover:bg-green-900/30"
@@ -395,11 +667,12 @@ export default function ChatPanel() {
         {pending && (
           <div className="flex justify-start">
             <div className="rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm text-zinc-400 dark:bg-zinc-800">
-              正在输入…
+              正在生成图表…
             </div>
           </div>
         )}
       </div>
+      )}
 
       <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
         <div className="flex items-end gap-2">
@@ -411,7 +684,7 @@ export default function ChatPanel() {
               autoResize();
             }}
             onKeyDown={handleKeyDown}
-            placeholder="输入消息…"
+            placeholder="描述你想要的图表，Enter 发送…"
             rows={1}
             className="max-h-[160px] min-h-[40px] flex-1 resize-none rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
           />
@@ -436,6 +709,18 @@ export default function ChatPanel() {
           </button>
         </div>
       </div>
+      <NewChatDialog
+        open={newChatDialogOpen}
+        onSaveAndNew={() => {
+          setNewChatDialogOpen(false);
+          resetToExamples(true);
+        }}
+        onDiscardAndNew={() => {
+          setNewChatDialogOpen(false);
+          resetToExamples(false);
+        }}
+        onCancel={() => setNewChatDialogOpen(false)}
+      />
     </div>
   );
 }
