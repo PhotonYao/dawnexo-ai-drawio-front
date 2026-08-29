@@ -31,8 +31,13 @@ export interface ChatRequest {
   message: string;
 }
 
-/** 智能体对话返回结果（content 为 draw.io XML） */
+/**
+ * 智能体对话返回结果
+ * - type = "user"：向用户追问，content 为对话文本（提示用户补充信息）
+ * - type = "drawio"：content 为 draw.io XML，渲染到画布并展示在消息中
+ */
 export interface ChatData {
+  type: string;
   content: string;
 }
 

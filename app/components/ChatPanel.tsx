@@ -4,9 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { chat, createSession, queryAgentConfigList } from "../api/agent";
 import {
   downloadDrawioXml,
-  extractDrawioXml,
   hasDiagramContent,
 } from "../utils/drawio";
+import { parseAgentReply } from "../utils/chat";
 import { QUICK_EXAMPLES, type QuickExample } from "../config/examples";
 import type { AgentConfig } from "../types/api";
 import { useAuth } from "./AuthGate";
@@ -200,22 +200,21 @@ export default function ChatPanel({
         },
         controller.signal
       );
-      const content = res.content ?? "";
-      const xml = extractDrawioXml(content);
-      if (xml) {
-        onDiagramXml?.(xml);
+      // 解析回复：drawio 类型渲染画布并展示 XML；user 类型提示用户补充信息
+      const reply = parseAgentReply(res.type, res.content);
+      if (reply.kind === "drawio") {
+        onDiagramXml?.(reply.xml);
         upsertAgentMessage(
-          {
-            content: "已根据你的描述生成图表，并渲染到左侧画布，可直接编辑或导出。",
-            code: xml,
-          },
+          { content: reply.text, code: reply.xml },
           targetAgentId
         );
       } else {
         upsertAgentMessage(
-          { content: content || "（智能体未返回内容）" },
+          { content: reply.text || "（智能体未返回内容）" },
           targetAgentId
         );
+        // 聚焦输入框，方便用户补充信息
+        inputRef.current?.focus();
       }
     } catch (err) {
       // 用户主动停止生成时不追加错误消息
@@ -425,7 +424,7 @@ export default function ChatPanel({
 
   return (
     <div
-      className="relative flex shrink-0 flex-col rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+      className="relative flex min-h-0 shrink-0 flex-col overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
       style={{ width: `${width}px` }}
     >
       <div

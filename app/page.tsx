@@ -37,7 +37,7 @@ function AppShell() {
   const getCanvasXml = useCallback(() => canvasXmlRef.current, []);
 
   return (
-    <div className="flex flex-1 flex-col bg-zinc-50 font-sans dark:bg-black">
+    <div className="flex min-h-0 flex-1 flex-col bg-zinc-50 font-sans dark:bg-black">
       <main className="flex min-h-0 flex-1 flex-row gap-3 p-3">
         <div className="min-w-0 flex-1">
           <DrawIoEditor diagramXml={diagram} onXmlChange={handleXmlChange} />
