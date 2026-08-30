@@ -8,6 +8,11 @@ import {
 } from "../utils/drawio";
 import { parseAgentReply } from "../utils/chat";
 import { QUICK_EXAMPLES, type QuickExample } from "../config/examples";
+import {
+  listRecentChats,
+  saveRecentChat,
+  type RecentChat,
+} from "../utils/recent-chats";
 import type { AgentConfig } from "../types/api";
 import { useAuth } from "./AuthGate";
 import { CodeBlock, splitContentSegments } from "./CodeBlock";
@@ -39,6 +44,17 @@ interface ChatPanelProps {
   onClearCanvas?: () => void;
 }
 
+/** 格式化最近对话时间：当天显示 HH:mm，否则显示 M-D HH:mm */
+function formatChatTime(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(
+    d.getMinutes()
+  ).padStart(2, "0")}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  return `${d.getMonth() + 1}-${d.getDate()} ${hm}`;
+}
+
 export default function ChatPanel({
   onDiagramXml,
   getCanvasXml,
@@ -66,15 +82,26 @@ export default function ChatPanel({
   const [currentAgentId, setCurrentAgentId] = useState("");
   // 当前会话 ID（对话前若为空则自动创建）
   const sessionIdRef = useRef<string>("");
+  // 当前会话 ID 的状态镜像（供渲染高亮与持久化使用）
+  const [activeSessionId, setActiveSessionId] = useState("");
+  // 最近对话列表（本地持久化，最多 20 条）
+  const [recentChats, setRecentChats] = useState<RecentChat[]>([]);
+  // 最近一次生成的图表 XML（持久化到最近对话，恢复画布用）
+  const lastDiagramXmlRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // 挂载后加载智能体配置列表（未登录时不加载；登录态变化由 key 重挂载完成重置）
+  // 挂载后加载智能体配置列表与最近对话（未登录时不加载；登录态变化由 key 重挂载完成重置）
   useEffect(() => {
     if (!isLoggedIn || !user) return;
     let cancelled = false;
+    // 异步读取本地最近对话，避免 effect 内同步 setState
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setRecentChats(listRecentChats(user.user));
+    });
     queryAgentConfigList()
       .then((list) => {
         if (cancelled) return;
@@ -200,9 +227,15 @@ export default function ChatPanel({
         },
         controller.signal
       );
+      // 以服务端回传的会话 ID 为准（归属校验/自愈后可能已更新）
+      if (res.sessionId && res.sessionId !== sessionIdRef.current) {
+        sessionIdRef.current = res.sessionId;
+        setActiveSessionId(res.sessionId);
+      }
       // 解析回复：drawio 类型渲染画布并展示 XML；user 类型提示用户补充信息
       const reply = parseAgentReply(res.type, res.content);
       if (reply.kind === "drawio") {
+        lastDiagramXmlRef.current = reply.xml;
         onDiagramXml?.(reply.xml);
         upsertAgentMessage(
           { content: reply.text, code: reply.xml },
@@ -267,6 +300,7 @@ export default function ChatPanel({
     }
     onClearCanvas?.();
     sessionIdRef.current = "";
+    setActiveSessionId("");
     setMessages(INITIAL_MESSAGES);
     setShowExamples(true);
   };
@@ -284,6 +318,7 @@ export default function ChatPanel({
   // 同时创建 SessionID，便于后续在该会话中继续对话
   const handleExample = (example: QuickExample) => {
     onDiagramXml?.(example.xml);
+    lastDiagramXmlRef.current = example.xml;
     setShowExamples(false);
     setMessages([
       { id: crypto.randomUUID(), role: "user", content: example.prompt },
@@ -298,11 +333,51 @@ export default function ChatPanel({
       createSession({ agentId: currentAgentId, userId: user.user })
         .then((created) => {
           sessionIdRef.current = created.sessionId;
+          setActiveSessionId(created.sessionId);
         })
         .catch(() => {
           // 创建失败不阻断示例展示，后续发送消息时会自动重试创建
         });
     }
+  };
+
+  // 对话消息变化时持久化到「最近对话」（最多 20 条，超出自动淘汰最旧记录）
+  useEffect(() => {
+    if (!user || showExamples) return;
+    if (!activeSessionId || messages.length === 0) return;
+    const agent = agents.find((a) => a.agentId === currentAgentId);
+    const firstUser = messages.find((m) => m.role === "user");
+    const chat: Omit<RecentChat, "updatedAt"> = {
+      sessionId: activeSessionId,
+      agentId: currentAgentId,
+      agentName: agent?.agentName ?? "",
+      title: (firstUser?.content ?? "新对话").slice(0, 30),
+      messages,
+      lastXml: lastDiagramXmlRef.current,
+    };
+    saveRecentChat(user.user, chat);
+    Promise.resolve().then(() => {
+      setRecentChats(listRecentChats(user.user));
+    });
+  }, [messages, user, showExamples, agents, currentAgentId, activeSessionId]);
+
+  // 打开最近对话：恢复消息与画布，并复用其会话 ID
+  const handleOpenRecent = (chat: RecentChat) => {
+    if (pending) return;
+    setShowExamples(false);
+    setMessages(chat.messages);
+    lastDiagramXmlRef.current = chat.lastXml;
+    sessionIdRef.current = chat.sessionId;
+    setActiveSessionId(chat.sessionId);
+    // 智能体仍存在时复用其会话，否则回退到第一个可用智能体并重建会话
+    if (agents.some((a) => a.agentId === chat.agentId)) {
+      setCurrentAgentId(chat.agentId);
+    } else {
+      setCurrentAgentId(agents[0]?.agentId ?? "");
+      sessionIdRef.current = "";
+      setActiveSessionId("");
+    }
+    if (chat.lastXml) onDiagramXml?.(chat.lastXml);
   };
 
   // 输入框随内容自动增高（上限后滚动）
@@ -533,6 +608,49 @@ export default function ChatPanel({
                 </div>
               </button>
             ))}
+          </div>
+
+          <div className="mt-5">
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+              最近对话
+            </h2>
+            {recentChats.length === 0 ? (
+              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                暂无最近对话，发送消息后将自动保存（最多 20 条）。
+              </p>
+            ) : (
+              <div className="mt-2 flex flex-col gap-2">
+                {recentChats.map((chat) => {
+                  const active = chat.sessionId === activeSessionId;
+                  return (
+                    <button
+                      key={chat.sessionId}
+                      type="button"
+                      onClick={() => handleOpenRecent(chat)}
+                      title={chat.title}
+                      className={`rounded-lg border p-3 text-left transition-colors ${
+                        active
+                          ? "border-blue-400 bg-blue-50/60 dark:border-blue-500 dark:bg-blue-950/40"
+                          : "border-zinc-200 hover:border-blue-400 hover:bg-blue-50/60 dark:border-zinc-700 dark:hover:border-blue-500 dark:hover:bg-blue-950/40"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                          {chat.title}
+                        </span>
+                        <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">
+                          {formatChatTime(chat.updatedAt)}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
+                        {chat.agentName || "未知智能体"} · 会话{" "}
+                        {chat.sessionId.slice(0, 8)}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       ) : (

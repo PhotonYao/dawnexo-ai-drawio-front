@@ -35,10 +35,12 @@ export interface ChatRequest {
  * 智能体对话返回结果
  * - type = "user"：向用户追问，content 为对话文本（提示用户补充信息）
  * - type = "drawio"：content 为 draw.io XML，渲染到画布并展示在消息中
+ * - sessionId：服务端归属校验/自愈后实际使用的会话 ID，前端以此为准
  */
 export interface ChatData {
   type: string;
   content: string;
+  sessionId?: string;
 }
 
 /** 登录用户信息（保存在 cookie 中） */
