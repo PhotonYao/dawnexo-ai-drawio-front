@@ -1,6 +1,6 @@
 # Dawnexo AI Draw 前端 · 智能图表生成器
 
-基于 AI 对话的 draw.io 图表生成器前端，与配套后端 [dawnexo-ai-drawio-backend](../dawnexo-ai-drawio-backend) 一起构成完整应用：用自然语言描述图表，智能体生成 draw.io XML 并自动渲染到左侧画布。本仓库为 AI 辅助从零搭建，未基于任何脚手架模板。
+基于 AI 对话的 draw.io 图表生成器前端，与配套后端 [dawnexo-ai-drawio-backend](https://github.com/PhotonYao/dawnexo-ai-drawio-backend) 一起构成完整应用：用自然语言描述图表，智能体生成 draw.io XML 并自动渲染到左侧画布。
 
 ## 功能特性
 
