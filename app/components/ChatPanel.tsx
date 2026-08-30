@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { chat, createSession, queryAgentConfigList } from "../api/agent";
 import {
   downloadDrawioXml,
@@ -10,6 +10,8 @@ import { parseAgentReply } from "../utils/chat";
 import { QUICK_EXAMPLES, type QuickExample } from "../config/examples";
 import {
   listRecentChats,
+  removeRecentChat,
+  renameRecentChat,
   saveRecentChat,
   type RecentChat,
 } from "../utils/recent-chats";
@@ -55,6 +57,12 @@ function formatChatTime(ts: number): string {
   return `${d.getMonth() + 1}-${d.getDate()} ${hm}`;
 }
 
+/** 取首条用户消息内容作为会话标题 */
+function firstUserTitle(messages: Message[]): string | null {
+  const first = messages.find((m) => m.role === "user");
+  return first?.content ?? null;
+}
+
 export default function ChatPanel({
   onDiagramXml,
   getCanvasXml,
@@ -86,12 +94,24 @@ export default function ChatPanel({
   const [activeSessionId, setActiveSessionId] = useState("");
   // 最近对话列表（本地持久化，最多 20 条）
   const [recentChats, setRecentChats] = useState<RecentChat[]>([]);
+  // 最近对话列表的 ref 镜像（持久化时读取，避免引入循环依赖）
+  const recentChatsRef = useRef<RecentChat[]>([]);
+  // 正在重命名的最近对话 ID 与标题草稿
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
   // 最近一次生成的图表 XML（持久化到最近对话，恢复画布用）
   const lastDiagramXmlRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // 读取本地最近对话并刷新列表状态与 ref 镜像
+  const refreshRecentChats = useCallback((username: string) => {
+    const list = listRecentChats(username);
+    recentChatsRef.current = list;
+    setRecentChats(list);
+  }, []);
 
   // 挂载后加载智能体配置列表与最近对话（未登录时不加载；登录态变化由 key 重挂载完成重置）
   useEffect(() => {
@@ -100,7 +120,7 @@ export default function ChatPanel({
     // 异步读取本地最近对话，避免 effect 内同步 setState
     Promise.resolve().then(() => {
       if (cancelled) return;
-      setRecentChats(listRecentChats(user.user));
+      refreshRecentChats(user.user);
     });
     queryAgentConfigList()
       .then((list) => {
@@ -119,7 +139,7 @@ export default function ChatPanel({
     return () => {
       cancelled = true;
     };
-  }, [isLoggedIn, user]);
+  }, [isLoggedIn, user, refreshRecentChats]);
 
   // 拖动左侧分隔条调节对话页宽度（带最小/最大宽度限制）
   const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -194,6 +214,7 @@ export default function ChatPanel({
       userId: user!.user,
     });
     sessionIdRef.current = created.sessionId;
+    setActiveSessionId(created.sessionId);
     return created.sessionId;
   };
 
@@ -301,6 +322,7 @@ export default function ChatPanel({
     onClearCanvas?.();
     sessionIdRef.current = "";
     setActiveSessionId("");
+    lastDiagramXmlRef.current = null;
     setMessages(INITIAL_MESSAGES);
     setShowExamples(true);
   };
@@ -346,20 +368,36 @@ export default function ChatPanel({
     if (!user || showExamples) return;
     if (!activeSessionId || messages.length === 0) return;
     const agent = agents.find((a) => a.agentId === currentAgentId);
-    const firstUser = messages.find((m) => m.role === "user");
+    const existing = recentChatsRef.current.find(
+      (c) => c.sessionId === activeSessionId
+    );
+    // 用户重命名过的标题不再被首条用户消息覆盖
+    const renamed = existing?.renamed ?? false;
     const chat: Omit<RecentChat, "updatedAt"> = {
       sessionId: activeSessionId,
       agentId: currentAgentId,
       agentName: agent?.agentName ?? "",
-      title: (firstUser?.content ?? "新对话").slice(0, 30),
+      title:
+        renamed && existing
+          ? existing.title
+          : (firstUserTitle(messages) ?? "新对话").slice(0, 30),
+      renamed,
       messages,
       lastXml: lastDiagramXmlRef.current,
     };
     saveRecentChat(user.user, chat);
     Promise.resolve().then(() => {
-      setRecentChats(listRecentChats(user.user));
+      refreshRecentChats(user.user);
     });
-  }, [messages, user, showExamples, agents, currentAgentId, activeSessionId]);
+  }, [
+    messages,
+    user,
+    showExamples,
+    agents,
+    currentAgentId,
+    activeSessionId,
+    refreshRecentChats,
+  ]);
 
   // 打开最近对话：恢复消息与画布，并复用其会话 ID
   const handleOpenRecent = (chat: RecentChat) => {
@@ -378,6 +416,36 @@ export default function ChatPanel({
       setActiveSessionId("");
     }
     if (chat.lastXml) onDiagramXml?.(chat.lastXml);
+  };
+
+  // 进入重命名状态
+  const startRename = (chat: RecentChat) => {
+    setRenamingId(chat.sessionId);
+    setRenameText(chat.title);
+  };
+
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameText("");
+  };
+
+  // 保存重命名后的标题
+  const saveRename = () => {
+    const title = renameText.trim();
+    if (!renamingId || !title || !user) {
+      cancelRename();
+      return;
+    }
+    renameRecentChat(user.user, renamingId, title);
+    refreshRecentChats(user.user);
+    cancelRename();
+  };
+
+  // 删除一条最近对话（仅移除记录本身，不影响进行中的会话）
+  const handleDeleteRecent = (chat: RecentChat) => {
+    if (!user) return;
+    removeRecentChat(user.user, chat.sessionId);
+    refreshRecentChats(user.user);
   };
 
   // 输入框随内容自动增高（上限后滚动）
@@ -622,31 +690,116 @@ export default function ChatPanel({
               <div className="mt-2 flex flex-col gap-2">
                 {recentChats.map((chat) => {
                   const active = chat.sessionId === activeSessionId;
+                  const renaming = renamingId === chat.sessionId;
                   return (
-                    <button
+                    <div
                       key={chat.sessionId}
-                      type="button"
-                      onClick={() => handleOpenRecent(chat)}
-                      title={chat.title}
-                      className={`rounded-lg border p-3 text-left transition-colors ${
+                      role="button"
+                      tabIndex={renaming ? -1 : 0}
+                      title={renaming ? undefined : chat.title}
+                      onClick={() => {
+                        if (!renaming) handleOpenRecent(chat);
+                      }}
+                      onKeyDown={(e) => {
+                        if (
+                          !renaming &&
+                          (e.key === "Enter" || e.key === " ")
+                        ) {
+                          e.preventDefault();
+                          handleOpenRecent(chat);
+                        }
+                      }}
+                      className={`group cursor-pointer rounded-lg border p-3 text-left transition-colors ${
                         active
                           ? "border-blue-400 bg-blue-50/60 dark:border-blue-500 dark:bg-blue-950/40"
                           : "border-zinc-200 hover:border-blue-400 hover:bg-blue-50/60 dark:border-zinc-700 dark:hover:border-blue-500 dark:hover:bg-blue-950/40"
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="min-w-0 truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                          {chat.title}
-                        </span>
-                        <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">
-                          {formatChatTime(chat.updatedAt)}
-                        </span>
-                      </div>
-                      <div className="mt-0.5 truncate text-xs text-zinc-500 dark:text-zinc-400">
-                        {chat.agentName || "未知智能体"} · 会话{" "}
-                        {chat.sessionId.slice(0, 8)}
-                      </div>
-                    </button>
+                      {renaming ? (
+                        <div className="flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            autoFocus
+                            value={renameText}
+                            onChange={(e) => setRenameText(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && !e.shiftKey) {
+                                e.preventDefault();
+                                saveRename();
+                              } else if (e.key === "Escape") {
+                                cancelRename();
+                              }
+                            }}
+                            placeholder="输入新的会话标题"
+                            className="h-8 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                          />
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={cancelRename}
+                              className="rounded-md px-2 py-1 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              onClick={saveRename}
+                              disabled={!renameText.trim()}
+                              className="rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              保存
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate text-sm font-medium text-zinc-900 dark:text-zinc-50">
+                              {chat.title}
+                            </span>
+                            <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                              <button
+                                type="button"
+                                title="重命名"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  startRename(chat);
+                                }}
+                                className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                              >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M12 20h9" />
+                                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                title="删除"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteRecent(chat);
+                                }}
+                                className="rounded p-1 text-zinc-400 transition-colors hover:bg-red-100 hover:text-red-600 dark:hover:bg-red-950/50 dark:hover:text-red-400"
+                              >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M3 6h18" />
+                                  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                                </svg>
+                              </button>
+                            </div>
+                          </div>
+                          <div className="mt-0.5 flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate text-xs text-zinc-500 dark:text-zinc-400">
+                              {chat.agentName || "未知智能体"} · 会话{" "}
+                              {chat.sessionId.slice(0, 8)}
+                            </span>
+                            <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">
+                              {formatChatTime(chat.updatedAt)}
+                            </span>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   );
                 })}
               </div>

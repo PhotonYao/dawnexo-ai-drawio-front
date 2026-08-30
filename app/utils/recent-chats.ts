@@ -23,8 +23,10 @@ export interface RecentChat {
   sessionId: string;
   agentId: string;
   agentName: string;
-  /** 会话标题（取首条用户消息截断） */
+  /** 会话标题（默认取首条用户消息截断，可由用户重命名） */
   title: string;
+  /** 用户是否手动重命名过标题（重命名后自动保存不再覆盖标题） */
+  renamed?: boolean;
   /** 最近更新时间戳 */
   updatedAt: number;
   messages: RecentChatMessage[];
@@ -94,6 +96,26 @@ export function removeRecentChat(username: string, sessionId: string): void {
   const list = listRecentChats(username).filter(
     (c) => c.sessionId !== sessionId
   );
+  try {
+    window.localStorage.setItem(storageKey(username), JSON.stringify(list));
+  } catch {
+    // 忽略写入失败
+  }
+}
+
+/** 重命名某条最近对话，并标记 renamed 防止后续自动保存覆盖 */
+export function renameRecentChat(
+  username: string,
+  sessionId: string,
+  title: string
+): void {
+  if (!username || typeof window === "undefined" || !sessionId || !title) {
+    return;
+  }
+  const list = listRecentChats(username);
+  const index = list.findIndex((c) => c.sessionId === sessionId);
+  if (index === -1) return;
+  list[index] = { ...list[index], title, renamed: true };
   try {
     window.localStorage.setItem(storageKey(username), JSON.stringify(list));
   } catch {
