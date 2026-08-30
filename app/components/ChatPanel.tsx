@@ -1,13 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chat, createSession, queryAgentConfigList } from "../api/agent";
 import {
   downloadDrawioXml,
   hasDiagramContent,
 } from "../utils/drawio";
 import { parseAgentReply } from "../utils/chat";
-import { QUICK_EXAMPLES, type QuickExample } from "../config/examples";
+import {
+  exampleText,
+  QUICK_EXAMPLES,
+  type QuickExample,
+} from "../config/examples";
+import { createT, type TFunc } from "../config/i18n";
 import {
   listRecentChats,
   removeRecentChat,
@@ -18,7 +23,7 @@ import {
 import type { AgentConfig } from "../types/api";
 import { useAuth } from "./AuthGate";
 import { CodeBlock, splitContentSegments } from "./CodeBlock";
-import SettingsPanel from "./SettingsPanel";
+import SettingsDialog from "./SettingsDialog";
 import NewChatDialog from "./NewChatDialog";
 
 type Message = {
@@ -29,12 +34,9 @@ type Message = {
   code?: string;
 };
 
-const INITIAL_MESSAGES: Message[] = [
-  {
-    id: "welcome",
-    role: "agent",
-    content: "你好，我是 AI 绘图助手。描述你想要的图表，我来帮你生成并渲染到左侧画布。",
-  },
+/** 首次进入的欢迎消息（按当前语言生成） */
+const initialMessages = (t: TFunc): Message[] => [
+  { id: "welcome", role: "agent", content: t("chat.welcome") },
 ];
 
 interface ChatPanelProps {
@@ -68,9 +70,12 @@ export default function ChatPanel({
   getCanvasXml,
   onClearCanvas,
 }: ChatPanelProps) {
-  const { user, isLoggedIn } = useAuth();
+  const { user, isLoggedIn, locale } = useAuth();
+  const t = useMemo(() => createT(locale), [locale]);
   const [collapsed, setCollapsed] = useState(false);
-  const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES);
+  const [messages, setMessages] = useState<Message[]>(() =>
+    initialMessages(t)
+  );
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
   const [width, setWidth] = useState(440);
@@ -226,8 +231,8 @@ export default function ChatPanel({
       upsertAgentMessage(
         {
           content: agentsError
-            ? `【接口异常】${agentsError}`
-            : "智能体列表加载中，请稍后重试。",
+            ? `${t("chat.agentError")}${agentsError}`
+            : t("chat.noAgent"),
         },
         targetAgentId
       );
@@ -259,12 +264,12 @@ export default function ChatPanel({
         lastDiagramXmlRef.current = reply.xml;
         onDiagramXml?.(reply.xml);
         upsertAgentMessage(
-          { content: reply.text, code: reply.xml },
+          { content: t("chat.diagramReady"), code: reply.xml },
           targetAgentId
         );
       } else {
         upsertAgentMessage(
-          { content: reply.text || "（智能体未返回内容）" },
+          { content: reply.text || t("chat.emptyReply") },
           targetAgentId
         );
         // 聚焦输入框，方便用户补充信息
@@ -275,7 +280,9 @@ export default function ChatPanel({
       if (err instanceof Error && err.name === "AbortError") return;
       upsertAgentMessage(
         {
-          content: `【请求异常】${err instanceof Error ? err.message : "未知错误"}`,
+          content: `${t("chat.requestError")}${
+            err instanceof Error ? err.message : t("chat.unknownError")
+          }`,
         },
         targetAgentId
       );
@@ -323,7 +330,7 @@ export default function ChatPanel({
     sessionIdRef.current = "";
     setActiveSessionId("");
     lastDiagramXmlRef.current = null;
-    setMessages(INITIAL_MESSAGES);
+    setMessages(initialMessages(t));
     setShowExamples(true);
   };
 
@@ -343,11 +350,15 @@ export default function ChatPanel({
     lastDiagramXmlRef.current = example.xml;
     setShowExamples(false);
     setMessages([
-      { id: crypto.randomUUID(), role: "user", content: example.prompt },
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: exampleText(t, example.id, "prompt"),
+      },
       {
         id: crypto.randomUUID(),
         role: "agent",
-        content: example.reply,
+        content: exampleText(t, example.id, "reply"),
         code: example.xml,
       },
     ]);
@@ -380,7 +391,7 @@ export default function ChatPanel({
       title:
         renamed && existing
           ? existing.title
-          : (firstUserTitle(messages) ?? "新对话").slice(0, 30),
+          : (firstUserTitle(messages) ?? t("chat.defaultTitle")).slice(0, 30),
       renamed,
       messages,
       lastXml: lastDiagramXmlRef.current,
@@ -397,6 +408,7 @@ export default function ChatPanel({
     currentAgentId,
     activeSessionId,
     refreshRecentChats,
+    t,
   ]);
 
   // 打开最近对话：恢复消息与画布，并复用其会话 ID
@@ -551,7 +563,7 @@ export default function ChatPanel({
       <button
         type="button"
         onClick={() => setCollapsed(false)}
-        title="展开对话"
+        title={t("chat.expand")}
         className="flex w-10 shrink-0 flex-col items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
       >
         <span className="text-lg">💬</span>
@@ -559,7 +571,7 @@ export default function ChatPanel({
           className="text-xs font-medium tracking-widest text-zinc-500 dark:text-zinc-400"
           style={{ writingMode: "vertical-rl" }}
         >
-          对话
+          {t("chat.tab")}
         </span>
       </button>
     );
@@ -567,18 +579,19 @@ export default function ChatPanel({
 
   return (
     <div
-      className="relative flex min-h-0 shrink-0 flex-col overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
+      className="relative flex min-h-0 shrink-0 flex-col rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900"
       style={{ width: `${width}px` }}
     >
+      {/* 拖拽把手：位于侧边栏边线左侧的间隙中 */}
       <div
         onPointerDown={startResize}
         onPointerMove={moveResize}
         onPointerUp={endResize}
-        title="拖动调节宽度"
-        className="group absolute -left-2 top-0 z-10 flex h-full w-2 cursor-col-resize items-center justify-center"
+        title={t("chat.resizeTitle")}
+        className="group absolute -left-3 top-0 z-10 flex h-full w-3 cursor-col-resize items-center justify-center"
         style={{ touchAction: "none" }}
       >
-        <div className="h-10 w-1 rounded-full bg-zinc-300 transition-colors group-hover:bg-zinc-400 dark:bg-zinc-700 dark:group-hover:bg-zinc-500" />
+        <div className="h-10 w-1 rounded-full bg-zinc-300 transition-colors group-hover:bg-blue-400 dark:bg-zinc-700 dark:group-hover:bg-blue-500" />
       </div>
       <div className="relative flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
         <div className="flex min-w-0 items-center gap-2">
@@ -589,14 +602,14 @@ export default function ChatPanel({
             ✦
           </span>
           <h1 className="min-w-0 truncate text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-            AI Draw.io 编辑器
+            {t("app.title")}
           </h1>
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <button
             type="button"
-            onClick={() => setSettingsOpen((prev) => !prev)}
-            title="设置"
+            onClick={() => setSettingsOpen(true)}
+            title={t("settings.title")}
             aria-expanded={settingsOpen}
             className={`rounded-md p-1.5 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 ${
               settingsOpen
@@ -612,7 +625,7 @@ export default function ChatPanel({
           <button
             type="button"
             onClick={() => setCollapsed(true)}
-            title="收起"
+            title={t("chat.collapse")}
             className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -620,18 +633,18 @@ export default function ChatPanel({
             </svg>
           </button>
         </div>
-        <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+        <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </div>
       <div className="flex items-center gap-2 border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <select
           value={currentAgentId}
           onChange={(e) => handleAgentChange(e.target.value)}
-          title="选择智能体"
+          title={t("chat.selectAgent")}
           className="h-7 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
         >
           {agents.length === 0 && (
             <option value="">
-              {agentsError ? "智能体加载失败" : "智能体加载中…"}
+              {agentsError ? t("chat.agentsFailed") : t("chat.agentsLoading")}
             </option>
           )}
           {agents.map((agent) => (
@@ -645,20 +658,20 @@ export default function ChatPanel({
           type="button"
           onClick={handleNewChat}
           disabled={pending}
-          title="新建对话"
+          title={t("chat.newTitle")}
           className="shrink-0 rounded-md border border-zinc-300 px-2 py-1 text-xs font-medium text-zinc-800 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-800"
         >
-          ＋ 新建
+          {t("chat.new")}
         </button>
       </div>
 
       {showExamples ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
           <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-            快速示例
+            {t("chat.quickExamples")}
           </h2>
           <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-            点击示例快速开始，图表会自动渲染到左侧画布，也可以直接输入你的需求。
+            {t("chat.quickExamplesDesc")}
           </p>
           <div className="mt-3 flex flex-col gap-2">
             {QUICK_EXAMPLES.map((example) => (
@@ -669,10 +682,10 @@ export default function ChatPanel({
                 className="rounded-lg border border-zinc-200 p-3 text-left transition-colors hover:border-blue-400 hover:bg-blue-50/60 dark:border-zinc-700 dark:hover:border-blue-500 dark:hover:bg-blue-950/40"
               >
                 <div className="text-sm font-medium text-zinc-900 dark:text-zinc-50">
-                  {example.title}
+                  {exampleText(t, example.id, "title")}
                 </div>
                 <div className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                  {example.description}
+                  {exampleText(t, example.id, "description")}
                 </div>
               </button>
             ))}
@@ -680,11 +693,11 @@ export default function ChatPanel({
 
           <div className="mt-5">
             <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">
-              最近对话
+              {t("chat.recentChats")}
             </h2>
             {recentChats.length === 0 ? (
               <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                暂无最近对话，发送消息后将自动保存（最多 20 条）。
+                {t("chat.recentEmpty")}
               </p>
             ) : (
               <div className="mt-2 flex flex-col gap-2">
@@ -729,7 +742,7 @@ export default function ChatPanel({
                                 cancelRename();
                               }
                             }}
-                            placeholder="输入新的会话标题"
+                            placeholder={t("chat.renamePlaceholder")}
                             className="h-8 w-full rounded-md border border-zinc-300 bg-white px-2 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
                           />
                           <div className="flex justify-end gap-2">
@@ -738,7 +751,7 @@ export default function ChatPanel({
                               onClick={cancelRename}
                               className="rounded-md px-2 py-1 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
                             >
-                              取消
+                              {t("common.cancel")}
                             </button>
                             <button
                               type="button"
@@ -746,7 +759,7 @@ export default function ChatPanel({
                               disabled={!renameText.trim()}
                               className="rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                             >
-                              保存
+                              {t("common.save")}
                             </button>
                           </div>
                         </div>
@@ -759,7 +772,7 @@ export default function ChatPanel({
                             <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                               <button
                                 type="button"
-                                title="重命名"
+                                title={t("chat.rename")}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   startRename(chat);
@@ -773,7 +786,7 @@ export default function ChatPanel({
                               </button>
                               <button
                                 type="button"
-                                title="删除"
+                                title={t("chat.delete")}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleDeleteRecent(chat);
@@ -790,7 +803,8 @@ export default function ChatPanel({
                           </div>
                           <div className="mt-0.5 flex items-center justify-between gap-2">
                             <span className="min-w-0 truncate text-xs text-zinc-500 dark:text-zinc-400">
-                              {chat.agentName || "未知智能体"} · 会话{" "}
+                              {chat.agentName || t("chat.unknownAgent")} ·{" "}
+                              {t("chat.sessionLabel")}{" "}
                               {chat.sessionId.slice(0, 8)}
                             </span>
                             <span className="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">
@@ -835,7 +849,7 @@ export default function ChatPanel({
                       onClick={cancelEdit}
                       className="rounded-md px-3 py-1 text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
                     >
-                      取消
+                      {t("common.cancel")}
                     </button>
                     <button
                       type="button"
@@ -843,7 +857,7 @@ export default function ChatPanel({
                       disabled={!editText.trim()}
                       className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      保存并提交
+                      {t("chat.saveAndSubmit")}
                     </button>
                   </div>
                 </div>
@@ -855,7 +869,7 @@ export default function ChatPanel({
               <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                 <button
                   type="button"
-                  title="编辑消息"
+                  title={t("chat.editMessage")}
                   onClick={() => startEdit(msg)}
                   className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
                 >
@@ -866,7 +880,7 @@ export default function ChatPanel({
                 </button>
                 <button
                   type="button"
-                  title={copiedId === msg.id ? "已复制" : "复制消息"}
+                  title={copiedId === msg.id ? t("chat.copied") : t("chat.copy")}
                   onClick={() => copyText(msg.content, msg.id)}
                   className={`rounded p-1 transition-colors ${
                     copiedId === msg.id
@@ -895,7 +909,7 @@ export default function ChatPanel({
               <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                 <button
                   type="button"
-                  title={copiedId === msg.id ? "已复制" : "复制消息"}
+                  title={copiedId === msg.id ? t("chat.copied") : t("chat.copy")}
                   onClick={() => copyText(msg.code ?? msg.content, msg.id)}
                   className={`rounded p-1 transition-colors ${
                     copiedId === msg.id
@@ -917,7 +931,7 @@ export default function ChatPanel({
                 {index === lastAgentIndex && (
                   <button
                     type="button"
-                    title="重新生成响应"
+                    title={t("chat.regenerate")}
                     onClick={() => handleRetry(msg.id)}
                     disabled={pending}
                     className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-200 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
@@ -937,7 +951,7 @@ export default function ChatPanel({
         {pending && (
           <div className="flex justify-start">
             <div className="rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm text-zinc-400 dark:bg-zinc-800">
-              正在生成图表…
+              {t("chat.generating")}
             </div>
           </div>
         )}
@@ -954,7 +968,7 @@ export default function ChatPanel({
               autoResize();
             }}
             onKeyDown={handleKeyDown}
-            placeholder="描述你想要的图表，Enter 发送…"
+            placeholder={t("chat.placeholder")}
             rows={1}
             className="max-h-[160px] min-h-[40px] flex-1 resize-none rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
           />
@@ -962,7 +976,7 @@ export default function ChatPanel({
             type="button"
             onClick={pending ? stopGeneration : handleSend}
             disabled={!pending && !input.trim()}
-            title={pending ? "停止生成" : "发送"}
+            title={pending ? t("chat.stop") : t("chat.send")}
             className="shrink-0 self-end rounded-md bg-blue-600 p-2 text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {pending ? (

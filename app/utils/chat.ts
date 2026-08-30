@@ -1,17 +1,28 @@
 import { extractDrawioXml } from "./drawio";
 
-/** 智能体回复的解析结果 */
+/** 智能体回复的解析结果（文案由 UI 层按语言生成） */
 export type AgentReply =
   | { kind: "user"; text: string }
-  | { kind: "drawio"; text: string; xml: string };
+  | { kind: "drawio"; xml: string };
 
-// drawio 类型回复时在消息框中展示的说明文案
-const DRAWIO_REPLY_TEXT =
-  "已根据你的描述生成图表，并渲染到左侧画布，可直接编辑或导出。";
-
-interface ReplyJson {
-  type?: string;
-  content?: string;
+/**
+ * 从 Markdown 围栏代码块中提取最终结果 JSON（{"type":...,"content":...}）。
+ * 智能体可能输出整段 Markdown（分析说明、mermaid、审查结论等），
+ * 最终结果 JSON 通常位于末尾的 ```json 块中，从后往前找第一个可解析的块。
+ */
+function extractJsonReply(
+  raw: string
+): { type: string; content: string } | null {
+  const blocks = [...raw.matchAll(/```[^\n]*\n?([\s\S]*?)```/g)];
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const candidate = blocks[i][1].trim();
+    if (!candidate.startsWith("{")) continue;
+    const obj = lenientJsonParse(candidate);
+    if (obj && typeof obj.content === "string") {
+      return { type: obj.type || "", content: obj.content };
+    }
+  }
+  return null;
 }
 
 /**
@@ -21,9 +32,9 @@ interface ReplyJson {
  * "Bad control character in string literal"，此处将字符串内部的
  * 控制字符转义后重试。
  */
-function lenientJsonParse(text: string): ReplyJson | null {
+function lenientJsonParse(text: string): { type?: string; content?: string } | null {
   try {
-    return JSON.parse(text) as ReplyJson;
+    return JSON.parse(text) as { type?: string; content?: string };
   } catch {
     // 继续容错处理
   }
@@ -57,30 +68,10 @@ function lenientJsonParse(text: string): ReplyJson | null {
     out += ch;
   }
   try {
-    return JSON.parse(out) as ReplyJson;
+    return JSON.parse(out) as { type?: string; content?: string };
   } catch {
     return null;
   }
-}
-
-/**
- * 从 Markdown 围栏代码块中提取最终结果 JSON（{"type":...,"content":...}）。
- * 智能体可能输出整段 Markdown（分析说明、mermaid、审查结论等），
- * 最终结果 JSON 通常位于末尾的 ```json 块中，从后往前找第一个可解析的块。
- */
-function extractJsonReply(
-  raw: string
-): { type: string; content: string } | null {
-  const blocks = [...raw.matchAll(/```[^\n]*\n?([\s\S]*?)```/g)];
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const candidate = blocks[i][1].trim();
-    if (!candidate.startsWith("{")) continue;
-    const obj = lenientJsonParse(candidate);
-    if (obj && typeof obj.content === "string") {
-      return { type: obj.type || "", content: obj.content };
-    }
-  }
-  return null;
 }
 
 /**
@@ -120,7 +111,6 @@ export function parseAgentReply(
   if (replyType === "drawio") {
     return {
       kind: "drawio",
-      text: DRAWIO_REPLY_TEXT,
       xml: extractDrawioXml(replyContent) ?? replyContent,
     };
   }
@@ -131,7 +121,7 @@ export function parseAgentReply(
   // 3. 类型未知时按内容推断
   const xml = extractDrawioXml(replyContent);
   if (xml) {
-    return { kind: "drawio", text: DRAWIO_REPLY_TEXT, xml };
+    return { kind: "drawio", xml };
   }
   return { kind: "user", text: replyContent };
 }

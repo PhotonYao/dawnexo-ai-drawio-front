@@ -1,6 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useAuth } from "./AuthGate";
+import { createT } from "../config/i18n";
 
 // 演示账号（与后端 docs 登录页 login.html 保持一致）
 const DEMO_USERNAME = "admin";
@@ -14,6 +16,8 @@ interface LoginDialogProps {
 
 /** 登录弹窗：未登录时由 AuthGate 展示，风格与整体页面保持一致 */
 export default function LoginDialog({ open, onLogin }: LoginDialogProps) {
+  const { locale } = useAuth();
+  const t = useMemo(() => createT(locale), [locale]);
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -27,7 +31,7 @@ export default function LoginDialog({ open, onLogin }: LoginDialogProps) {
     const u = username.trim();
     const p = password.trim();
     if (!u || !p) {
-      setError("请输入账号和密码");
+      setError(t("login.errorRequired"));
       return;
     }
     setSubmitting(true);
@@ -38,7 +42,7 @@ export default function LoginDialog({ open, onLogin }: LoginDialogProps) {
       if (u === DEMO_USERNAME && p === DEMO_PASSWORD) {
         onLogin(u);
       } else {
-        setError("账号或密码错误（演示账号 admin/admin）");
+        setError(t("login.errorInvalid"));
       }
     }, 200);
   };
@@ -51,36 +55,36 @@ export default function LoginDialog({ open, onLogin }: LoginDialogProps) {
             ✦
           </span>
           <h2 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-            登录 AI Draw.io 编辑器
+            {t("login.title")}
           </h2>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            请登录以继续使用智能体服务
+            {t("login.subtitle")}
           </p>
         </div>
         <form onSubmit={handleSubmit} autoComplete="off" className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <label htmlFor="login-username" className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
-              账号
+              {t("login.username")}
             </label>
             <input
               id="login-username"
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="请输入账号"
+              placeholder={t("login.usernamePlaceholder")}
               className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
             />
           </div>
           <div className="flex flex-col gap-1.5">
             <label htmlFor="login-password" className="text-xs font-medium text-zinc-600 dark:text-zinc-300">
-              密码
+              {t("login.password")}
             </label>
             <input
               id="login-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="请输入密码"
+              placeholder={t("login.passwordPlaceholder")}
               className="h-10 rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-800 outline-none transition-colors focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
             />
           </div>
@@ -90,10 +94,11 @@ export default function LoginDialog({ open, onLogin }: LoginDialogProps) {
             disabled={submitting}
             className="h-10 rounded-md bg-blue-600 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {submitting ? "登录中…" : "登 录"}
+            {submitting ? t("login.submitting") : t("login.submit")}
           </button>
           <p className="text-center text-xs text-zinc-400 dark:text-zinc-500">
-            演示账号 / 密码：<span className="font-medium text-zinc-500 dark:text-zinc-400">admin / admin</span>
+            {t("login.demoHint")}
+            <span className="font-medium text-zinc-500 dark:text-zinc-400">admin / admin</span>
           </p>
         </form>
       </div>

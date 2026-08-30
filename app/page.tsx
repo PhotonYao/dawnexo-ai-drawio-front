@@ -8,7 +8,7 @@ import { EMPTY_XML, SAMPLE_XML } from "./config/diagram-xml";
 
 /** 主界面：需要登录后展示，登录用户变化时重置对话状态 */
 function AppShell() {
-  const { user } = useAuth();
+  const { user, locale } = useAuth();
   // 下发给画布的图表载荷（AI 生成 / 清空），seq 递保证重复内容也能触发加载
   const [diagram, setDiagram] = useState<DiagramPayload | null>(null);
   const diagramSeqRef = useRef(0);
@@ -35,12 +35,20 @@ function AppShell() {
   }, []);
 
   const getCanvasXml = useCallback(() => canvasXmlRef.current, []);
+  // 语言切换重载画布时，取最近一次画布内容作为初始图表
+  const getInitialCanvasXml = useCallback(() => canvasXmlRef.current, []);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-zinc-50 font-sans dark:bg-black">
       <main className="flex min-h-0 flex-1 flex-row gap-3 p-3">
         <div className="min-w-0 flex-1">
-          <DrawIoEditor diagramXml={diagram} onXmlChange={handleXmlChange} />
+          {/* key 绑定语言：切换语言时重载 draw.io 编辑器以切换其界面语言；初始图表取当前画布内容 */}
+          <DrawIoEditor
+            key={locale}
+            diagramXml={diagram}
+            getInitialXml={getInitialCanvasXml}
+            onXmlChange={handleXmlChange}
+          />
         </div>
         <ChatPanel
           key={user?.user ?? "guest"}

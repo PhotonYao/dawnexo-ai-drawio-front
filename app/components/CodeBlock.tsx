@@ -1,6 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useAuth } from "./AuthGate";
+import { createT } from "../config/i18n";
 
 export type ContentSegment =
   | { type: "text"; text: string }
@@ -34,6 +36,8 @@ const EXPANDED_HEIGHT = 420;
 
 /** 代码块展示组件：长代码默认折叠，支持展开 / 收起与复制 */
 export function CodeBlock({ code }: { code: string }) {
+  const { locale } = useAuth();
+  const t = useMemo(() => createT(locale), [locale]);
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const lineCount = code.split("\n").length;
@@ -54,12 +58,12 @@ export function CodeBlock({ code }: { code: string }) {
     <div className="mt-2 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-950">
       <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-2.5 py-1 dark:border-zinc-700">
         <span className="shrink-0 text-[11px] text-zinc-500 dark:text-zinc-400">
-          代码（{lineCount} 行）
+          {t("code.lines", { n: lineCount })}
         </span>
         <div className="flex items-center gap-1">
           <button
             type="button"
-            title={copied ? "已复制" : "复制代码"}
+            title={copied ? t("code.copied") : t("code.copy")}
             onClick={copy}
             className={`rounded p-0.5 transition-colors ${
               copied
@@ -84,7 +88,7 @@ export function CodeBlock({ code }: { code: string }) {
               onClick={() => setExpanded((prev) => !prev)}
               className="rounded px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
             >
-              {expanded ? "收起" : "展开"}
+              {expanded ? t("code.collapse") : t("code.expand")}
             </button>
           )}
         </div>
@@ -106,7 +110,7 @@ export function CodeBlock({ code }: { code: string }) {
           onClick={() => setExpanded(true)}
           className="w-full border-t border-zinc-200 py-1 text-[11px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-200"
         >
-          展开全部（{lineCount} 行）
+          {t("code.expandAll", { n: lineCount })}
         </button>
       )}
     </div>
