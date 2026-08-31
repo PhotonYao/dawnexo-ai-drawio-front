@@ -32,14 +32,16 @@ export interface ChatRequest {
 }
 
 /**
- * 智能体对话返回结果
- * - type = "user"：向用户追问，content 为对话文本（提示用户补充信息）
- * - type = "drawio"：content 为 draw.io XML，渲染到画布并展示在消息中
+ * 智能体对话返回结果（三字段结构，文本说明与图表数据分离）
+ * - type = "user"：向用户追问，explanation 为对话文本（提示用户补充信息）
+ * - type = "drawio"：diagram 为 draw.io XML，渲染到画布并展示在消息中
+ * - type = "mixed"：explanation 与 diagram 同时存在（说明文字 + 图表数据）
  * - sessionId：服务端归属校验/自愈后实际使用的会话 ID，前端以此为准
  */
 export interface ChatData {
   type: string;
-  content: string;
+  explanation?: string;
+  diagram?: string;
   sessionId?: string;
 }
 

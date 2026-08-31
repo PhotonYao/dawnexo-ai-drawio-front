@@ -52,7 +52,7 @@ export function createSession(
   );
 }
 
-/** 智能体对话，返回 {type, content}（signal 用于停止生成） */
+/** 智能体对话，返回 {type, explanation, diagram}（signal 用于停止生成） */
 export function chat(req: ChatRequest, signal?: AbortSignal): Promise<ChatData> {
   return request<ChatData>(API_ENDPOINTS.chat, {
     method: "POST",

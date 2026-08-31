@@ -258,22 +258,22 @@ export default function ChatPanel({
         sessionIdRef.current = res.sessionId;
         setActiveSessionId(res.sessionId);
       }
-      // 解析回复：drawio 类型渲染画布并展示 XML；user 类型提示用户补充信息
-      const reply = parseAgentReply(res.type, res.content);
-      if (reply.kind === "drawio") {
-        lastDiagramXmlRef.current = reply.xml;
-        onDiagramXml?.(reply.xml);
-        upsertAgentMessage(
-          { content: t("chat.diagramReady"), code: reply.xml },
-          targetAgentId
-        );
-      } else {
+      // 解析回复：explanation 为说明/追问文本，diagram 为图表 XML，两者可同时存在（mixed）
+      const reply = parseAgentReply(res.explanation, res.diagram);
+      if (reply.kind === "user") {
         upsertAgentMessage(
           { content: reply.text || t("chat.emptyReply") },
           targetAgentId
         );
         // 聚焦输入框，方便用户补充信息
         inputRef.current?.focus();
+      } else {
+        lastDiagramXmlRef.current = reply.xml;
+        onDiagramXml?.(reply.xml);
+        upsertAgentMessage(
+          { content: reply.text || t("chat.diagramReady"), code: reply.xml },
+          targetAgentId
+        );
       }
     } catch (err) {
       // 用户主动停止生成时不追加错误消息
