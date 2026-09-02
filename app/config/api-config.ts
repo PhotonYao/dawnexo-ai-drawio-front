@@ -4,7 +4,10 @@
  */
 
 // 后端服务根地址
-export const API_BASE = "http://127.0.0.1:8090";
+// 默认空串 = 同源相对路径：浏览器请求本站点的 /api/v1/*，
+// 由服务器上的 nginx 按 location ^~ /api/ 转发到后端，前端不写死任何地址。
+// 仅前后端分域名部署时才需要构建期注入 NEXT_PUBLIC_API_BASE 指定绝对地址。
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 
 // 接口前缀
 export const API_PREFIX = "/api/v1";

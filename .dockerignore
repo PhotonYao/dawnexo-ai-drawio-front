@@ -1,0 +1,16 @@
+# 依赖与构建产物（容器内重新安装/构建）
+node_modules
+.next
+
+# 版本控制与本地文件
+.git
+.gitignore
+.env*
+*.md
+
+# Docker 自身文件
+Dockerfile
+.dockerignore
+
+# 本地数据
+docs
