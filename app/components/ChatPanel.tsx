@@ -7,6 +7,7 @@ import {
   hasDiagramContent,
 } from "../utils/drawio";
 import { parseAgentReply } from "../utils/chat";
+import { generateId } from "../utils/uuid";
 import {
   exampleText,
   QUICK_EXAMPLES,
@@ -203,7 +204,7 @@ export default function ChatPanel({
         : [
             ...prev,
             {
-              id: crypto.randomUUID(),
+              id: generateId(),
               role: "agent" as const,
               ...msg,
             },
@@ -297,7 +298,7 @@ export default function ChatPanel({
     if (!text || pending) return;
 
     const userMsg: Message = {
-      id: crypto.randomUUID(),
+      id: generateId(),
       role: "user",
       content: text,
     };
@@ -351,12 +352,12 @@ export default function ChatPanel({
     setShowExamples(false);
     setMessages([
       {
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: "user",
         content: exampleText(t, example.id, "prompt"),
       },
       {
-        id: crypto.randomUUID(),
+        id: generateId(),
         role: "agent",
         content: exampleText(t, example.id, "reply"),
         code: example.xml,
