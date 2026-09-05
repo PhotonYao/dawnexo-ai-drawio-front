@@ -24,8 +24,10 @@ export const API_ENDPOINTS = {
   queryAgentConfigList: "/query_ai_agent_config_list",
   // 创建会话
   createSession: "/create_session",
-  // 智能体对话
+  // 智能体对话（同步，作为流式失败时的降级通道）
   chat: "/chat",
+  // 智能体对话（SSE 流式）
+  chatStream: "/chat_stream",
 } as const;
 
 /** 拼接完整接口地址 */

@@ -1,7 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { chat, createSession, queryAgentConfigList } from "../api/agent";
+import {
+  chat,
+  chatStream,
+  createSession,
+  queryAgentConfigList,
+} from "../api/agent";
 import {
   downloadDrawioXml,
   hasDiagramContent,
@@ -34,6 +39,23 @@ type Message = {
   /** 附带的代码（如 AI 生成的 draw.io XML），在气泡中以可折叠代码块展示 */
   code?: string;
 };
+
+/** 执行轨迹行：流式生成期间按智能体分行展示各阶段实时输出（打字机） */
+type AgentTraceRow = {
+  author: string;
+  stage: string;
+  content: string;
+};
+
+/** 智能体名 -> i18n 显示名 key（未登记的智能体回退为去掉 agent_ 前缀的原名） */
+const AGENT_LABEL_KEYS: Record<string, string> = {
+  agent_analyst: "chat.agent.analyst",
+  agent_drawer: "chat.agent.drawer",
+  agent_reviewer: "chat.agent.reviewer",
+};
+
+/** 已登记的阶段（用于生成轨迹行状态文案） */
+const KNOWN_STAGES = new Set(["analyze", "draw", "review"]);
 
 /** 首次进入的欢迎消息（按当前语言生成） */
 const initialMessages = (t: TFunc): Message[] => [
@@ -79,6 +101,10 @@ export default function ChatPanel({
   );
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
+  // 流式对话的当前阶段（analyze/draw/review），空串表示未收到阶段事件
+  const [pendingStage, setPendingStage] = useState("");
+  // 流式生成期间的执行轨迹（按智能体分行，token 事件驱动打字机）
+  const [agentTrace, setAgentTrace] = useState<AgentTraceRow[]>([]);
   const [width, setWidth] = useState(440);
   const MIN_WIDTH = 200;
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -118,6 +144,24 @@ export default function ChatPanel({
     recentChatsRef.current = list;
     setRecentChats(list);
   }, []);
+
+  // 最终气泡打字机动画定时器（组件卸载时清理）
+  const typeTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (typeTimerRef.current !== null) window.clearInterval(typeTimerRef.current);
+    },
+    []
+  );
+
+  // 智能体显示名：优先 i18n，未登记的回退为去掉 agent_ 前缀的原名
+  const agentDisplayName = useCallback(
+    (author: string) => {
+      const key = AGENT_LABEL_KEYS[author];
+      return key ? t(key) : author.replace(/^agent_/, "");
+    },
+    [t]
+  );
 
   // 挂载后加载智能体配置列表与最近对话（未登录时不加载；登录态变化由 key 重挂载完成重置）
   useEffect(() => {
@@ -185,7 +229,7 @@ export default function ChatPanel({
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [messages, agentTrace]);
 
   // 记录最后一个系统（agent）消息的索引，用于仅在其上显示「重新生成」按钮
   const lastAgentIndex = messages.reduce(
@@ -224,7 +268,8 @@ export default function ChatPanel({
     return created.sessionId;
   };
 
-  // 调用智能体对话接口：返回内容若为 draw.io XML 则渲染到画布，否则作为文本展示
+  // 调用智能体对话接口：返回内容若为 draw.io XML 则渲染到画布，否则作为文本展示。
+  // 优先走 SSE 流式接口（阶段提示 + 画布草稿提前可见），流式建立失败时降级同步接口一次。
   const runChat = async (userText: string, targetAgentId?: string) => {
     if (pending) return;
     if (!isLoggedIn || !user) return;
@@ -241,19 +286,58 @@ export default function ChatPanel({
     }
 
     setPending(true);
+    setPendingStage("");
+    setAgentTrace([]);
     const controller = new AbortController();
     abortRef.current = controller;
-    try {
-      const sessionId = await ensureSession();
-      const res = await chat(
-        {
-          agentId: currentAgentId,
-          userId: user.user,
-          sessionId,
-          message: userText,
-        },
-        controller.signal
-      );
+
+    // 以打字机动画渐显最终气泡（重新生成/空文案时直接整段显示）
+    const appendAgentMessageAnimated = (
+      content: string,
+      code?: string,
+      replaceAgentId?: string
+    ) => {
+      if (typeTimerRef.current !== null) {
+        window.clearInterval(typeTimerRef.current);
+        typeTimerRef.current = null;
+      }
+      if (replaceAgentId || !content) {
+        upsertAgentMessage(
+          { content: content || t("chat.diagramReady"), ...(code ? { code } : {}) },
+          replaceAgentId
+        );
+        return;
+      }
+      const id = generateId();
+      setMessages((prev) => [
+        ...prev,
+        { id, role: "agent" as const, content: "", ...(code ? { code } : {}) },
+      ]);
+      // 约 60 帧内放完，长文本步进更大，短文本也有可感知的渐显
+      const step = Math.max(1, Math.ceil(content.length / 60));
+      let shown = 0;
+      typeTimerRef.current = window.setInterval(() => {
+        shown = Math.min(content.length, shown + step);
+        const snapshot = content.slice(0, shown);
+        setMessages((prev) =>
+          prev.map((m) => (m.id === id ? { ...m, content: snapshot } : m))
+        );
+        if (shown >= content.length && typeTimerRef.current !== null) {
+          window.clearInterval(typeTimerRef.current);
+          typeTimerRef.current = null;
+        }
+      }, 24);
+    };
+
+    // 流式/同步回复的统一后处理：更新会话 ID、渲染画布、追加消息气泡
+    const applyReply = (res: {
+      type: string;
+      explanation?: string;
+      diagram?: string;
+      sessionId?: string;
+    }) => {
+      // 收尾：执行轨迹完成使命，由正式气泡替代
+      setAgentTrace([]);
       // 以服务端回传的会话 ID 为准（归属校验/自愈后可能已更新）
       if (res.sessionId && res.sessionId !== sessionIdRef.current) {
         sessionIdRef.current = res.sessionId;
@@ -262,22 +346,88 @@ export default function ChatPanel({
       // 解析回复：explanation 为说明/追问文本，diagram 为图表 XML，两者可同时存在（mixed）
       const reply = parseAgentReply(res.explanation, res.diagram);
       if (reply.kind === "user") {
-        upsertAgentMessage(
-          { content: reply.text || t("chat.emptyReply") },
-          targetAgentId
-        );
+        appendAgentMessageAnimated(reply.text || t("chat.emptyReply"), undefined, targetAgentId);
         // 聚焦输入框，方便用户补充信息
         inputRef.current?.focus();
       } else {
         lastDiagramXmlRef.current = reply.xml;
         onDiagramXml?.(reply.xml);
-        upsertAgentMessage(
-          { content: reply.text || t("chat.diagramReady"), code: reply.xml },
+        appendAgentMessageAnimated(
+          reply.text || t("chat.diagramReady"),
+          reply.xml,
           targetAgentId
         );
       }
+    };
+
+    try {
+      const sessionId = await ensureSession();
+      const req = {
+        agentId: currentAgentId,
+        userId: user.user,
+        sessionId,
+        message: userText,
+      };
+
+      // 标记是否已收到过流式事件：有产出后断流应直接报错，而不是重发一遍同步请求
+      let receivedEvent = false;
+      try {
+        const res = await chatStream(
+          req,
+          {
+            onFirstEvent: () => {
+              receivedEvent = true;
+            },
+            onStage: (author, stage) => {
+              setPendingStage(stage);
+              // 按智能体建立/更新轨迹行
+              setAgentTrace((prev) => {
+                const idx = prev.findIndex((r) => r.author === author);
+                if (idx < 0) return [...prev, { author, stage, content: "" }];
+                const next = [...prev];
+                next[idx] = { ...next[idx], stage };
+                return next;
+              });
+            },
+            onToken: (author, stage, delta) => {
+              // 增量文本追加到对应智能体的轨迹行（打字机效果）
+              setAgentTrace((prev) => {
+                const idx = prev.findIndex((r) => r.author === author);
+                if (idx < 0) {
+                  return [...prev, { author, stage, content: delta }];
+                }
+                const next = [...prev];
+                next[idx] = {
+                  ...next[idx],
+                  stage: stage || next[idx].stage,
+                  content: next[idx].content + delta,
+                };
+                return next;
+              });
+            },
+            onDiagram: (xml) => {
+              // 快照在流程结束时刻到达，直接上画布（page 的 seq 机制保证重复 XML 也会刷新）
+              lastDiagramXmlRef.current = xml;
+              onDiagramXml?.(xml);
+            },
+          },
+          controller.signal
+        );
+        applyReply(res);
+      } catch (streamErr) {
+        // 用户主动停止生成时不追加错误消息
+        if (streamErr instanceof Error && streamErr.name === "AbortError") {
+          return;
+        }
+        // 流式尚未产生任何事件（连接失败/网关不支持等）→ 降级同步接口重试一次
+        if (!receivedEvent) {
+          const res = await chat(req, controller.signal);
+          applyReply(res);
+        } else {
+          throw streamErr;
+        }
+      }
     } catch (err) {
-      // 用户主动停止生成时不追加错误消息
       if (err instanceof Error && err.name === "AbortError") return;
       upsertAgentMessage(
         {
@@ -290,6 +440,8 @@ export default function ChatPanel({
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setPending(false);
+      setPendingStage("");
+      setAgentTrace([]);
     }
   };
 
@@ -949,10 +1101,36 @@ export default function ChatPanel({
             </div>
           )
         )}
-        {pending && (
+        {pending && agentTrace.length > 0 && (
+          <div className="flex justify-start">
+            <div className="w-[88%] max-w-[88%] space-y-2 rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 dark:bg-zinc-800">
+              {agentTrace.map((row) => (
+                <div key={row.author}>
+                  <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-blue-400" />
+                    {agentDisplayName(row.author)}
+                    <span className="text-zinc-300 dark:text-zinc-600">·</span>
+                    <span className="font-normal text-zinc-400 dark:text-zinc-500">
+                      {KNOWN_STAGES.has(row.stage)
+                        ? t(`chat.stage.${row.stage}`)
+                        : t("chat.generating")}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 max-h-24 overflow-y-auto whitespace-pre-wrap break-all text-xs leading-relaxed text-zinc-400 dark:text-zinc-500">
+                    {row.content}
+                    <span className="animate-pulse">▋</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {pending && agentTrace.length === 0 && (
           <div className="flex justify-start">
             <div className="rounded-lg rounded-bl-sm bg-zinc-100 px-3 py-2 text-sm text-zinc-400 dark:bg-zinc-800">
-              {t("chat.generating")}
+              {pendingStage
+                ? t(`chat.stage.${pendingStage}`)
+                : t("chat.generating")}
             </div>
           </div>
         )}

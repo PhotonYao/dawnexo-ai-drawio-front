@@ -50,3 +50,25 @@ export interface LoginUser {
   user: string;
   ts: number;
 }
+
+/**
+ * chat_stream SSE 事件负载（与后端 ChatStreamEvent 对应，data 为 JSON）
+ * - stage: 工作流阶段推进（analyze/draw/review），author 为当前智能体名
+ * - token: 流式增量文本（author + stage + delta），前端做打字机效果
+ * - diagram: 完整且后端已校验的 XML 快照（draft 草稿 / final 终稿），画布可直接加载
+ * - message: 给用户阅读的完整文本
+ * - done: 正常结束，sessionId 为自愈后实际会话 ID
+ * - error: 失败说明
+ */
+export interface ChatStreamPayload {
+  type: "stage" | "token" | "diagram" | "message" | "done" | "error";
+  author?: string;
+  stage?: string;
+  delta?: string;
+  phase?: "draft" | "final";
+  xml?: string;
+  responseType?: string;
+  explanation?: string;
+  sessionId?: string;
+  message?: string;
+}
